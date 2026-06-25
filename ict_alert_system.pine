@@ -1,0 +1,181 @@
+//@version=5
+indicator("ICT Alert System - FVG + Sweep + NY Killzone", overlay=true, max_bars_back=500)
+
+// === INPUTS ===
+fvg_lookback   = input.int(50,   "FVG Lookback (bars)",       minval=10,   maxval=200)
+sweep_lookback = input.int(20,   "Sweep Lookback (bars)",     minval=5,    maxval=100)
+eq_threshold   = input.float(0.03,"Equal H/L Threshold (%)", minval=0.01, maxval=1.0, step=0.01)
+show_fvg       = input.bool(true, "Show FVG Boxes")
+show_sweep     = input.bool(true, "Show Sweep Markers")
+show_killzone  = input.bool(true, "Show NY Killzone")
+
+// === NY KILLZONE 7am-10am EST ===
+ny_open        = timestamp("America/New_York", year, month, dayofmonth, 7,  0)
+ny_close       = timestamp("America/New_York", year, month, dayofmonth, 10, 0)
+in_ny_killzone = time >= ny_open and time <= ny_close
+bgcolor(show_killzone and in_ny_killzone ? color.new(color.yellow, 90) : na, title="NY Killzone")
+
+// === SESSION TIMESTAMPS ===
+asia_open  = timestamp("America/New_York", year, month, dayofmonth, 20, 0) - 86400000
+asia_close = timestamp("America/New_York", year, month, dayofmonth, 0,  0)
+lon_open   = timestamp("America/New_York", year, month, dayofmonth, 2,  0)
+lon_close  = timestamp("America/New_York", year, month, dayofmonth, 5,  0)
+
+// === SESSION H/L VARIABLES ===
+var float asia_high = na
+var float asia_low  = na
+var float lon_high  = na
+var float lon_low   = na
+
+if hour(time, "America/New_York") == 7 and minute(time, "America/New_York") == 0
+    asia_high := na
+    asia_low  := na
+    lon_high  := na
+    lon_low   := na
+
+in_asia = time >= asia_open and time <= asia_close
+if in_asia
+    asia_high := na(asia_high) ? high : math.max(asia_high, high)
+    asia_low  := na(asia_low)  ? low  : math.min(asia_low,  low)
+
+in_london = time >= lon_open and time <= lon_close
+if in_london
+    lon_high := na(lon_high) ? high : math.max(lon_high, high)
+    lon_low  := na(lon_low)  ? low  : math.min(lon_low,  low)
+
+plot(asia_high, "Asia High",   color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr)
+plot(asia_low,  "Asia Low",    color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr)
+plot(lon_high,  "London High", color=color.new(color.blue,   0), linewidth=1, style=plot.style_linebr)
+plot(lon_low,   "London Low",  color=color.new(color.blue,   0), linewidth=1, style=plot.style_linebr)
+
+// === EQUAL HIGHS / EQUAL LOWS ===
+var bool  eq_hi_found = false
+var bool  eq_lo_found = false
+var float eq_hi_level = 0.0
+var float eq_lo_level = 0.0
+
+eq_hi_found := false
+eq_lo_found := false
+
+for i = 1 to sweep_lookback
+    for j = i + 1 to sweep_lookback
+        hi_diff = math.abs(high[i] - high[j]) / high[i] * 100
+        lo_diff = math.abs(low[i]  - low[j])  / low[i]  * 100
+        if hi_diff <= eq_threshold
+            eq_hi_found := true
+            eq_hi_level := (high[i] + high[j]) / 2
+        if lo_diff <= eq_threshold
+            eq_lo_found := true
+            eq_lo_level := (low[i] + low[j]) / 2
+
+// === LIQUIDITY SWEEP DETECTION ===
+swept_asia_high = not na(asia_high) and high > asia_high and close < asia_high
+swept_asia_low  = not na(asia_low)  and low  < asia_low  and close > asia_low
+swept_lon_high  = not na(lon_high)  and high > lon_high  and close < lon_high
+swept_lon_low   = not na(lon_low)   and low  < lon_low   and close > lon_low
+swept_eq_high   = eq_hi_found and high > eq_hi_level and close < eq_hi_level
+swept_eq_low    = eq_lo_found and low  < eq_lo_level and close > eq_lo_level
+
+bullish_sweep = swept_asia_low  or swept_lon_low  or swept_eq_low
+bearish_sweep = swept_asia_high or swept_lon_high or swept_eq_high
+
+if show_sweep and bullish_sweep and in_ny_killzone
+    label.new(bar_index, low,  "SWEEP", color=color.green, textcolor=color.white, style=label.style_label_up,   size=size.small)
+if show_sweep and bearish_sweep and in_ny_killzone
+    label.new(bar_index, high, "SWEEP", color=color.red,   textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// === FAIR VALUE GAP DETECTION WITH AUTO-REMOVAL ===
+// Store FVG data + box references so we can delete invalidated boxes
+var float[] bull_fvg_top  = array.new_float(0)
+var float[] bull_fvg_bot  = array.new_float(0)
+var box[]   bull_fvg_boxes = array.new_box(0)
+
+var float[] bear_fvg_top  = array.new_float(0)
+var float[] bear_fvg_bot  = array.new_float(0)
+var box[]   bear_fvg_boxes = array.new_box(0)
+
+bull_fvg_formed = low[0] > high[2]
+bear_fvg_formed = high[0] < low[2]
+
+// Add new bullish FVG
+if bull_fvg_formed
+    array.push(bull_fvg_top, low[0])
+    array.push(bull_fvg_bot, high[2])
+    new_box = box.new(bar_index - 2, low[0], bar_index + 500, high[2], border_color=color.new(color.green, 50), bgcolor=color.new(color.green, 85))
+    array.push(bull_fvg_boxes, new_box)
+
+// Add new bearish FVG
+if bear_fvg_formed
+    array.push(bear_fvg_top, low[2])
+    array.push(bear_fvg_bot, high[0])
+    new_box = box.new(bar_index - 2, low[2], bar_index + 500, high[0], border_color=color.new(color.red, 50), bgcolor=color.new(color.red, 85))
+    array.push(bear_fvg_boxes, new_box)
+
+// === AUTO-REMOVE INVALIDATED FVGs ===
+// Bullish FVG invalidated when price fully closes BELOW the bottom of the gap
+if show_fvg and array.size(bull_fvg_top) > 0
+    i = 0
+    while i < array.size(bull_fvg_top)
+        bot = array.get(bull_fvg_bot, i)
+        if close < bot
+            box.delete(array.get(bull_fvg_boxes, i))
+            array.remove(bull_fvg_top,   i)
+            array.remove(bull_fvg_bot,   i)
+            array.remove(bull_fvg_boxes, i)
+        else
+            i += 1
+
+// Bearish FVG invalidated when price fully closes ABOVE the top of the gap
+if show_fvg and array.size(bear_fvg_top) > 0
+    i = 0
+    while i < array.size(bear_fvg_top)
+        top = array.get(bear_fvg_top, i)
+        if close > top
+            box.delete(array.get(bear_fvg_boxes, i))
+            array.remove(bear_fvg_top,   i)
+            array.remove(bear_fvg_bot,   i)
+            array.remove(bear_fvg_boxes, i)
+        else
+            i += 1
+
+// Trim arrays to lookback limit
+if array.size(bull_fvg_top) > fvg_lookback
+    box.delete(array.shift(bull_fvg_boxes))
+    array.shift(bull_fvg_top)
+    array.shift(bull_fvg_bot)
+
+if array.size(bear_fvg_top) > fvg_lookback
+    box.delete(array.shift(bear_fvg_boxes))
+    array.shift(bear_fvg_top)
+    array.shift(bear_fvg_bot)
+
+// === FVG RETEST CHECK (full candle body inside gap) ===
+var bool bull_retest = false
+var bool bear_retest = false
+
+bull_retest := false
+bear_retest := false
+
+if array.size(bull_fvg_top) > 0
+    for i = 0 to array.size(bull_fvg_top) - 1
+        top = array.get(bull_fvg_top, i)
+        bot = array.get(bull_fvg_bot, i)
+        if close <= top and close >= bot and open <= top and open >= bot
+            bull_retest := true
+
+if array.size(bear_fvg_top) > 0
+    for i = 0 to array.size(bear_fvg_top) - 1
+        top = array.get(bear_fvg_top, i)
+        bot = array.get(bear_fvg_bot, i)
+        if close >= bot and close <= top and open >= bot and open <= top
+            bear_retest := true
+
+// === FINAL ALERT CONDITIONS ===
+long_alert  = in_ny_killzone and bullish_sweep and bull_retest
+short_alert = in_ny_killzone and bearish_sweep and bear_retest
+
+plotshape(long_alert,  title="LONG Signal",  location=location.belowbar, color=color.green, style=shape.triangleup,   size=size.normal, text="LONG")
+plotshape(short_alert, title="SHORT Signal", location=location.abovebar, color=color.red,   style=shape.triangledown, size=size.normal, text="SHORT")
+
+alertcondition(long_alert,  title="ICT LONG Setup",  message="ICT Long Alert: FVG Retest + Liquidity Sweep + NY Killzone aligned. Confirm your entry.")
+alertcondition(short_alert, title="ICT SHORT Setup", message="ICT Short Alert: FVG Retest + Liquidity Sweep + NY Killzone aligned. Confirm your entry.")
